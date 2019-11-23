@@ -134,7 +134,6 @@ class DQN(object):
                  buffer_size,
                  discount_factor,
                  num_training_steps,
-                 state_space,
                  action_space,
                  num_frames,
                  batch_size,
@@ -241,6 +240,19 @@ class DQN(object):
         plt.plot(losses)
         fig.savefig('DQN-SuperMarioBros'+str(frame_idx)+'.jpg')
 
+    def get_action(self, state, frame):
+        if frame > 1000:
+            actions = self.current_model.forward(state)
+            if actions.size(0) > 1:
+                values, action = actions.max(-1)
+                _, maxVal = values.max(0)
+                action = action[maxVal]
+            else:
+                _, action = actions.max(-1)
+            return action
+        else:
+            return np.random.randint(0, 8)
+
     # Main training loop
     def train(self):
         losses = []
@@ -261,7 +273,7 @@ class DQN(object):
             else:
                 _, action = actions.max(-1)
             next_state, reward, done, success = self.env.step(action.item())
-            reward = reward/100
+            # reward = reward/100
             episode_reward += reward
 
             next_state = to_tensor(next_state, use_cuda=self.use_cuda)
