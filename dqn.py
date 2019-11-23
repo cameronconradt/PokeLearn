@@ -5,21 +5,19 @@ import random
 import math
 from collections import namedtuple
 from torch.autograd import Variable
-from Memory.Buffer import  ReplayBuffer
 import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward', 'done'))
+                        ('state', 'action', 'next_state', 'reward', 'done', 'success'))
 USE_CUDA = torch.cuda.is_available()
 
 
 def to_tensor(v, use_cuda=True):
     if use_cuda:
-        v = torch.cuda.FloatTensor(v)
-    else:
-        v = torch.FloatTensor(v)
+        v = v.cuda()
     return v
 
 
@@ -135,23 +133,21 @@ class DQN(object):
                  learning_rate,
                  buffer_size,
                  discount_factor,
-                 num_rollouts,
                  num_training_steps,
-                 random_seed,
                  state_space,
                  action_space,
                  num_frames,
                  batch_size,
-                 height_img,
-                 width_img,
+                 height,
+                 width,
                  train_limit_buffer,
                  num_conv_layers, input_channels, pool_kernel_size,
                  kernel_size, dense_layer_features,
+                 random_seed=np.random.randint(0, 255),
                  use_cuda=False
                  ):
         self.env = env
         self.num_epochs = num_epochs
-        self.num_rollouts = num_rollouts
         self.num_training_steps = num_training_steps
         self.lr = learning_rate
         self.seed = random_seed
@@ -159,23 +155,20 @@ class DQN(object):
         self.gamma = discount_factor
         self.num_frames = num_frames
         self.batch_size = batch_size
-        self.height = height_img
-        self.width = width_img
+        self.height = height
+        self.width = width
         self.train_limit_buffer = train_limit_buffer
 
         self.buffer = ReplayBuffer(capacity=buffer_size, seed=random_seed)
 
-        self.current_model = ConvQNetwork(env=self.env, num_conv_layers=num_conv_layers, input_channels=input_channels,
+        self.current_model = ConvQNetwork(num_conv_layers=num_conv_layers, input_channels=input_channels,
                                           output_q_value=action_space, pool_kernel_size=pool_kernel_size,
                                           kernel_size=kernel_size, dense_layer_features=dense_layer_features,
                                           IM_HEIGHT=self.height, IM_WIDTH=self.width)
-        self.target_model = ConvQNetwork(env=self.env, num_conv_layers=num_conv_layers, input_channels=input_channels,
+        self.target_model = ConvQNetwork(num_conv_layers=num_conv_layers, input_channels=input_channels,
                                           output_q_value=action_space, pool_kernel_size=pool_kernel_size,
                                           kernel_size=kernel_size, dense_layer_features=dense_layer_features,
                                           IM_HEIGHT=self.height, IM_WIDTH=self.width)
-        self.encoder = Encoder(state_space=state_space, conv_kernel_size=3, conv_layers=32,
-                               hidden=64, input_channels=1, height=self.height,
-                               width=self.width)
 
         if self.use_cuda:
             self.current_model = self.current_model.cuda()
@@ -256,18 +249,22 @@ class DQN(object):
 
         state = self.env.reset()
         state = to_tensor(state, use_cuda=self.use_cuda)
-        state = self.encoder(state)
+        # state = self.encoder(state)
 
-        for frame_idx in range(1, self.num_frames+1):
+        for frame_idx in tqdm(range(1, self.num_frames+1)):
             epsilon_by_frame = epsilon_greedy_exploration()
-            epsilon = epsilon_by_frame(frame_idx)
-            action = self.current_model.act(state, epsilon)
+            actions = self.current_model.forward(state)
+            if actions.size(0) > 1:
+                values, action = actions.max(-1)
+                _, maxVal = values.max(0)
+                action = action[maxVal]
+            else:
+                _, action = actions.max(-1)
             next_state, reward, done, success = self.env.step(action.item())
             reward = reward/100
             episode_reward += reward
 
             next_state = to_tensor(next_state, use_cuda=self.use_cuda)
-            next_state = self.encoder(next_state)
 
             reward = torch.tensor([reward], dtype=torch.float)
 
@@ -281,7 +278,6 @@ class DQN(object):
             if done:
                 state = self.env.reset()
                 state = to_tensor(state, use_cuda=self.use_cuda)
-                state = self.encoder(state)
                 all_rewards.append(episode_reward)
                 episode_reward = 0
 
@@ -314,36 +310,29 @@ class ConvQNetwork(nn.Module):
         self.width = IM_WIDTH
 
         # Convolutional Block
-        self.conv1 = nn.Conv2d(in_channels=input_channels, out_channels=num_conv_layers, padding=0,
-                               kernel_size=self.kernel_size)
-        self.bn1  = nn.BatchNorm2d(num_features=num_conv_layers)
-        self.relu1 = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(in_channels=num_conv_layers, out_channels=num_conv_layers*2, padding=0,
-                               kernel_size=self.kernel_size)
-        self.bn2 = nn.BatchNorm2d(num_features=num_conv_layers*2)
-        self.relu2 = nn.ReLU(inplace=True)
-        self.conv3 = nn.Conv2d(in_channels=num_conv_layers*2, out_channels=num_conv_layers*2, padding=0,
-                               kernel_size=self.kernel_size)
-        self.bn3 = nn.BatchNorm2d(num_features=num_conv_layers*2)
-        self.relu3 = nn.ReLU(inplace=True)
-
-        #Fully connected layer
-        self.fully_connected_layer = nn.Linear(234432, self.dense_features)
-        self.relu4 = nn.ReLU(inplace=True)
-        self.output_layer = nn.Linear(256, output_q_value)
+        self.model = nn.Sequential(
+            nn.Conv2d(in_channels=input_channels, out_channels=num_conv_layers, padding=0,
+                               kernel_size=self.kernel_size),
+            nn.BatchNorm2d(num_features=num_conv_layers),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=num_conv_layers, out_channels=num_conv_layers*2, padding=0,
+                                   kernel_size=self.kernel_size),
+            nn.BatchNorm2d(num_features=num_conv_layers*2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=num_conv_layers*2, out_channels=num_conv_layers*2, padding=0,
+                                   kernel_size=self.kernel_size),
+            nn.BatchNorm2d(num_features=num_conv_layers*2),
+            nn.ReLU(inplace=True),
+        ).cuda()
+        # Fully connected layer
+        self.fully_connected_layer = nn.Linear(680064, self.dense_features).cuda()
+        self.relu4 = nn.ReLU(inplace=True).cuda()
+        self.output_layer = nn.Linear(256, output_q_value).cuda()
 
         # Weight initialization using Xavier initialization
 
     def forward(self, input):
-        x = self.conv1(input)
-        x = self.bn1(x)
-        x = self.relu1(x)
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu2(x)
-        x = self.conv3(x)
-        x = self.bn3(x)
-        x = self.relu3(x)
+        x = self.model(input)
         x = x.view(x.size(0), -1)
         x = self.fully_connected_layer(x)
         x = self.relu4(x)

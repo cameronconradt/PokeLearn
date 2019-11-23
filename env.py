@@ -1,5 +1,6 @@
 from tqdm import tqdm
-
+from torchvision import transforms
+import torch
 from pyboy import PyBoy, windowevent
 
 
@@ -17,6 +18,7 @@ class Env:
             args.rom,
             window_type="headless",  # For unattended use, for example machine learning
         )
+        self.transform = transforms.Compose([transforms.ToTensor()])
         self.args = args
         self.action_space = 8
         self.pyboy.set_emulation_speed(0)
@@ -35,20 +37,17 @@ class Env:
                     self.pyboy.send_input(windowevent.RELEASE_BUTTON_A)
             self.pyboy.save_state(open('start_game.state', 'wb'))
 
-        print(windowevent.PRESS_BUTTON_START)
-        self.pyboy.tick()
-        self.pyboy.get_screen_image().show()
-
     def step(self, action):
         frames = []
         for i in range(3):
             self.pyboy.send_input(action+1) #Translate up 1 action because 0 is quit
             self.pyboy.tick()
-            frames.append(self.pyboy.get_screen_image())
+            frames.append(self.transform(self.pyboy.get_screen_image()))
         self.pyboy.send_input(action + 9) #Translate up 9 actions to release
         self.pyboy.tick()
-        frames.append(self.pyboy.get_screen_image())
-        return frames, self.getReward()
+        frames.append(self.transform(self.pyboy.get_screen_image()))
+        frames = torch.stack(frames, 0)
+        return frames, self.getReward(), False, False
 
     def reset(self):
         if self.args.save_state != "":
@@ -56,7 +55,8 @@ class Env:
         else:
             self.pyboy.save_state(open('start_game.state', 'wb'))
         self.pyboy.tick()
-        return self.pyboy.get_screen_image()
+
+        return self.transform(self.pyboy.get_screen_image()).unsqueeze(0)
 
     def getReward(self):
         # Event Flags +1 D5A6-D85F
